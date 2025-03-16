@@ -1,7 +1,28 @@
 import numpy as np
 import torch
 import pywt
-from skimage.metrics import structural_similarity as ssim
+from pytorch_wavelets import DWTForward
+from torchmetrics.image.ssim import StructuralSimilarityIndexMeasure
+from torch.utils.data import Dataset
+
+"""
+Dataset for processing OFormer numpy files
+"""
+class CustomDataset(Dataset):
+  def __init__(self, filepath) -> None:
+     self.data = np.load(filepath)
+     self.data = self.data[:,:,:,:]
+     print(self.data.shape)
+
+  def __len__(self):
+    return (self.data.shape[0] - 1) * self.data.shape[-1]
+
+  def __getitem__(self, index):
+    seq_id = index // (self.data.shape[0] - 1)
+    item_id = index % (self.data.shape[0] - 1)
+    image = np.expand_dims(self.data[item_id,:,:,seq_id], axis=0)
+    target = np.expand_dims(self.data[item_id+1,:,:,seq_id], axis=0)
+    return image, target
 
 """
 Original implementation: https://www.geeksforgeeks.org/how-to-handle-overfitting-in-pytorch-models-using-early-stopping/
@@ -107,6 +128,9 @@ class FftLpLoss:
             return torch.sum(_diff / _norm)
         return _diff / _norm
     
+"""
+Wavelet-based loss function for considering high-frequencies
+"""
 class HighFrequencyLPLoss(object):
     def __init__(self, size_average=True, reduction=True, p=2, weight_hf=1.0, weight_lp=1.0):
         """
@@ -125,9 +149,9 @@ class HighFrequencyLPLoss(object):
         self.weight_lp = weight_lp
 
     def wavelet_high_frequency(self, image):
-        coeffs = pywt.dwt2(image, 'haar')
-        LL, (LH, HL, HH) = coeffs     
-        return LH, HL, HH
+        xfm = DWTForward(wave='haar')
+        aprox, details = xfm(image)
+        return details[0][:,:,0,:,:], details[0][:,:,1,:,:], details[0][:,:,2,:,:]
 
     def lp_loss(self, x, y):
         return torch.mean(torch.abs(x - y) ** self.p)
@@ -148,40 +172,23 @@ class HighFrequencyLPLoss(object):
         
     def compute_loss(self, x, y):
         batch_size = x.shape[0]
-        total_hf_loss = 0.0
-        total_lp_loss = 0.0
+        lp_loss = self.lp_loss(x, y)
 
-        for i in range(batch_size):
-            LH1, HL1, HH1 = self.wavelet_high_frequency(x[i].cpu().detach().numpy())
-            LH2, HL2, HH2 = self.wavelet_high_frequency(y[i].cpu().detach().numpy())
-            
-            LH1 = LH1[0]
-            HL1 = HL1[0]
-            HH1 = HH1[0]
-            
-            LH2 = LH2[0]
-            HL2 = HL2[0]
-            HH2 = HH2[0]
-
-            lh_similarity = ssim(LH1, LH2, data_range=LH2.max() - LH2.min())
-            hl_similarity = ssim(HL1, HL2, data_range=HL2.max() - HL2.min())
-            hh_similarity = ssim(HH1, HH2, data_range=HH2.max() - HH2.min())
-
-            lh_loss = 1 - lh_similarity
-            hl_loss = 1 - hl_similarity
-            hh_loss = 1 - hh_similarity
-
-            image_hf_loss = lh_loss + hl_loss + hh_loss
-            total_hf_loss += image_hf_loss
-
-            image_lp_loss = self.rel(x[i], y[i])
-            total_lp_loss += image_lp_loss
+        LH1, HL1, HH1 = self.wavelet_high_frequency(x)
+        LH2, HL2, HH2 = self.wavelet_high_frequency(y)
+        lh_ssim = StructuralSimilarityIndexMeasure(data_range=LH2.max() - LH2.min())
+        hl_ssim = StructuralSimilarityIndexMeasure(data_range=HL2.max() - HL2.min())
+        hh_ssim = StructuralSimilarityIndexMeasure(data_range=HH2.max() - HH2.min())
+        lh_loss = 1 - lh_ssim(LH1, LH2)
+        hl_loss = 1 - hl_ssim(HL1, HL2)
+        hh_loss = 1 - hh_ssim(HH1, HH2)
+        hf_loss = torch.mean(lh_loss + hl_loss + hh_loss)
             
         if self.size_average:
-            total_hf_loss /= batch_size
-            total_lp_loss /= batch_size
+            hf_loss /= batch_size
+            lp_loss /= batch_size
 
-        combined_loss = self.weight_hf * total_hf_loss + self.weight_lp * total_lp_loss
+        combined_loss = self.weight_hf * hf_loss + self.weight_lp * lp_loss
         return combined_loss
 
     def __call__(self, x, y):

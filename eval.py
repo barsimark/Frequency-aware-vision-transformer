@@ -145,6 +145,14 @@ def visualize_arrays(ground_truth_file, highlighted_file, other_files):
     plt.tight_layout()
     plt.show()
     
+def count_trainable_parameters(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"Layer: {name} | Trainable Parameters: {param.numel()}")
+
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\nTotal Trainable Parameters: {total_params}")
+    
     
 if __name__ == "__main__":
     data = np.load('data/fno_ns_Re1000_N1200_T20.npy')
