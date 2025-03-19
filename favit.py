@@ -173,7 +173,7 @@ class VisionTransformer(nn.Module):
         self.layers.append(transformer_block)
 
     # Patch Decoding
-    self.decoder = PatchDecoding(patch_size=patch_size, stride=stride, channels=ch, embed_dim=emb_dim)
+    self.decoder = PatchDecodingWithConvolution(patch_size=patch_size, stride=stride, channels=ch, embed_dim=emb_dim)
 
   def forward(self, img):
     _,_,h,w = img.shape
